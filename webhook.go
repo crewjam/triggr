@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/BurntSushi/toml"
+	"github.com/crewjam/errset"
 	"github.com/crewjam/httperr"
 	"github.com/google/go-github/github"
 	"github.com/kr/pretty"
@@ -42,6 +43,14 @@ func handleEvent(w http.ResponseWriter, r *http.Request) error {
 
 	switch event := event.(type) {
 	case *github.PullRequestEvent:
+		if event.GetAction() == "closed" {
+			err := handlePullRequestClosed(r.Context(), event)
+			if err != nil {
+				log.Printf("handlePullRequestClosed: %v", err)
+			}
+			return err
+		}
+
 		err := handlePullRequest(r.Context(), event)
 		if err != nil {
 			log.Printf("handlePullRequest: %v", err)
@@ -55,7 +64,6 @@ func handleEvent(w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 		return err
-
 	}
 	return nil
 }
@@ -102,6 +110,44 @@ func handlePush(ctx context.Context, event *github.PushEvent) error {
 		},
 	}
 	return b.Build(ctx)
+}
+
+func handlePullRequestClosed(ctx context.Context, event *github.PullRequestEvent) error {
+	log.Printf("pr %d was closed, deleting resources", event.PullRequest.GetNumber())
+
+	errs := errset.ErrSet{}
+	propagationPolicy := metav1.DeletePropagationBackground
+
+	ns, err := kubeClient.CoreV1().Namespaces().List(metav1.ListOptions{
+		LabelSelector: "pr=" + strconv.Itoa(event.PullRequest.GetNumber()),
+	})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("cannot list namespaces: %v", err))
+	} else {
+		for _, item := range ns.Items {
+			log.Printf("pr %d was closed, deleting namespace %s", event.PullRequest.GetNumber(), item.GetName())
+			err := kubeClient.CoreV1().Namespaces().Delete(item.GetName(), &metav1.DeleteOptions{
+				PropagationPolicy: &propagationPolicy,
+			})
+			if err != nil {
+				errs = append(errs, fmt.Errorf("cannot delete namespace %s: %v",
+					item.GetName(), err))
+			}
+		}
+	}
+
+	err = kubeClient.CoreV1().Pods(*kubeNamespace).DeleteCollection(
+		&metav1.DeleteOptions{
+			PropagationPolicy: &propagationPolicy,
+		},
+		metav1.ListOptions{
+			LabelSelector: "pr=" + strconv.Itoa(event.PullRequest.GetNumber()),
+		})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("cannot delete pods: %v", err))
+	}
+
+	return errs.ReturnValue()
 }
 
 func handlePullRequest(ctx context.Context, event *github.PullRequestEvent) error {
@@ -358,6 +404,7 @@ func (b *Builder) runTask(ctx context.Context, task TaskConfig) error {
 			Name:  "PULL_REQUEST",
 			Value: strconv.Itoa(b.PullRequest.GetNumber()),
 		})
+		pod.ObjectMeta.Labels["pr"] = strconv.Itoa(b.PullRequest.GetNumber())
 	}
 
 	// see about build secrets

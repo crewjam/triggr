@@ -3,6 +3,7 @@ WORKDIR /go/src/github.com/crewjam/triggr
 
 RUN go get -v github.com/BurntSushi/toml
 RUN go get -v github.com/crewjam/httperr
+RUN go get -v github.com/crewjam/errset
 RUN go get -v github.com/golang/glog
 RUN go get -v github.com/google/go-github/github
 RUN go get -v github.com/kr/pretty

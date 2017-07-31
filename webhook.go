@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/BurntSushi/toml"
 	"github.com/crewjam/httperr"
@@ -77,9 +78,10 @@ type Config struct {
 }
 
 type TaskConfig struct {
-	Name    string
-	Image   string
-	Command []string
+	Name          string
+	Image         string
+	Command       []string
+	MapDockerSock bool `toml:"map-docker-sock"` // Danger, Will Robinson.
 }
 
 type Repo interface {
@@ -185,7 +187,7 @@ func (b *Builder) writeGist(ctx context.Context) error {
 	for _, task := range b.Config.Tasks {
 		fmt.Fprintln(mdBuf, "## Task", task.Name)
 		fmt.Fprintln(mdBuf)
-		podName := fmt.Sprintf("github-%s-%s-%s-%s",
+		podName := fmt.Sprintf("triggr-%s-%s-%s-%s",
 			b.Owner,
 			b.Repo.GetName(),
 			b.SHA[:12],
@@ -193,6 +195,8 @@ func (b *Builder) writeGist(ctx context.Context) error {
 		podLink := fmt.Sprintf("http://localhost:8001/api/v1/proxy/namespaces/kube-system/services/kubernetes-dashboard/#!/log/%s/%s/?namespace=%s",
 			*kubeNamespace, podName, *kubeNamespace)
 		fmt.Fprintf(mdBuf, "- [Pod %s](%s)\n", podName, podLink)
+		fmt.Fprintf(mdBuf, "- Tail Logs: `kubectl --namespace \"%s\" logs \"%s\" -f`\n", *kubeNamespace, podName)
+		fmt.Fprintf(mdBuf, "- Info: `kubectl --namespace \"%s\" get pods \"%s\" -o yaml`\n", *kubeNamespace, podName)
 		fmt.Fprintln(mdBuf)
 		fmt.Fprintln(mdBuf)
 	}
@@ -212,7 +216,7 @@ func (b *Builder) writeGist(ctx context.Context) error {
 }
 
 func (b *Builder) startTask(ctx context.Context, task TaskConfig) error {
-	statusContext := *statusContext + task.Name
+	statusContext := *statusContext + "-" + task.Name
 	status := &github.RepoStatus{
 		State:       github.String("pending"),
 		TargetURL:   github.String(b.TargetURL),
@@ -269,15 +273,15 @@ func (b *Builder) runTask(ctx context.Context, task TaskConfig) error {
 				"owner":  b.Owner,
 			},
 			Annotations: map[string]string{
-				"triggr.crewjam.com/github-target-url":     b.TargetURL,                // e.g.  "http://some-url/job/12345"
-				"triggr.crewjam.com/github-last-status":    "pending",                  // e.g.   "pending"
-				"triggr.crewjam.com/github-status-context": *statusContext + task.Name, // e.g.   "os-triggr-build"
-				"triggr.crewjam.com/github-owner":          b.Owner,                    // e.g.    "crewjam"
-				"triggr.crewjam.com/github-repo":           b.Repo.GetName(),           // e.g.     "hello"
-				"triggr.crewjam.com/github-ref":            b.SHA,                      // e.g.      "adc83b19e793491b1c6ea0fd8b46cd9f32e592fc"
+				"triggr.crewjam.com/github-target-url":     b.TargetURL,
+				"triggr.crewjam.com/github-last-status":    "pending",
+				"triggr.crewjam.com/github-status-context": *statusContext + "-" + task.Name,
+				"triggr.crewjam.com/github-owner":          b.Owner,
+				"triggr.crewjam.com/github-repo":           b.Repo.GetName(),
+				"triggr.crewjam.com/github-ref":            b.SHA,
 				"triggr.crewjam.com/task-name":             task.Name,
 				"triggr.crewjam.com/output-gist":           b.Gist.GetID(),
-				"triggr.crewjam.com/output-gist-file-name": task.Name + "-output.txt",
+				"triggr.crewjam.com/output-gist-file-name": "output-" + task.Name + ".txt",
 			},
 		},
 		Spec: v1.PodSpec{
@@ -327,7 +331,7 @@ func (b *Builder) runTask(ctx context.Context, task TaskConfig) error {
 						},
 						{
 							Name:  "GITHUB_STATUS_CONTEXT",
-							Value: *statusContext + task.Name,
+							Value: *statusContext + "-" + task.Name,
 						},
 						{
 							Name:  "GITHUB_ACCESS_TOKEN",
@@ -346,6 +350,70 @@ func (b *Builder) runTask(ctx context.Context, task TaskConfig) error {
 				},
 			},
 		},
+	}
+
+	// add environment variable for pull request
+	if b.PullRequest != nil {
+		pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, v1.EnvVar{
+			Name:  "PULL_REQUEST",
+			Value: strconv.Itoa(b.PullRequest.GetNumber()),
+		})
+	}
+
+	// see about build secrets
+	{
+		secretWhen := "never"
+		if b.PullRequest != nil {
+			secretWhen = "pull-request"
+		}
+		if b.Ref == "refs/heads/master" {
+			secretWhen = "master"
+		}
+		secrets, err := kubeClient.CoreV1().Secrets(*kubeNamespace).List(metav1.ListOptions{
+			LabelSelector: "owner=" + b.Owner + ",repo=" + b.Repo.GetName() + ",when=" + secretWhen,
+		})
+		if err != nil {
+			return fmt.Errorf("cannot find secret: %v", err)
+		}
+		if len(secrets.Items) > 1 {
+			return fmt.Errorf("more than one secret matches labels")
+		}
+		if len(secrets.Items) == 1 {
+			secret := secrets.Items[0]
+
+			pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
+				Name: "build-secrets",
+				VolumeSource: v1.VolumeSource{
+					Secret: &v1.SecretVolumeSource{
+						SecretName: secret.GetName(),
+					},
+				},
+			})
+			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, v1.VolumeMount{
+				Name:      "build-secrets",
+				MountPath: "/var/run/secret/build",
+			})
+
+			pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, v1.EnvVar{
+				Name:  "BUILD_SECRETS",
+				Value: "/var/run/secret/build",
+			})
+		}
+	}
+
+	if task.MapDockerSock {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
+			Name: "docker-sock",
+			VolumeSource: v1.VolumeSource{
+				HostPath: &v1.HostPathVolumeSource{
+					Path: "/var/run/docker.sock",
+				},
+			},
+		})
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, v1.VolumeMount{
+			Name:      "docker-sock",
+			MountPath: "/var/run/docker.sock",
+		})
 	}
 
 	pod, err := kubeClient.CoreV1().Pods(*kubeNamespace).Create(pod)

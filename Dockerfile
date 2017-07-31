@@ -1,5 +1,6 @@
 FROM golang:1.8 as builder
 WORKDIR /go/src/github.com/crewjam/triggr
+
 RUN go get -v github.com/BurntSushi/toml
 RUN go get -v github.com/crewjam/httperr
 RUN go get -v github.com/golang/glog

@@ -53,7 +53,7 @@ kubectl get service triggr -w
 
 3. Create a webhook in github, *Settings*, *Webhooks*, *Add WebHook*.  
 
-- Set the URL to *http:// **SERVICE-URL** /event*.
+- Set the URL to *http:// **SERVICE-EXTERNAL-IP** /event*.
 - Set the Content type to *application/json*.
 - Set the secret to the random value you generated before
 - Choose "Let me select individual events." and pick *Push* and *Pull Request*
@@ -78,3 +78,24 @@ name = "test"
 command = ["go", "test", "./..."]
 ```
 
+## Build Secrets
+
+The container will search for a Kubernetes secret that has labels corresponding 
+to  the situation and mount it in the container. The environment variable 
+`BUILD_SECRETS` contains the directory where these secrets are located. The 
+secret must be labled with `owner` = *your-user-id*, `repo` = *the name of the 
+repository* and `when` = either `pull-request` or `master` depending on when it
+should be used.
+
+Example:
+
+```
+kubectl --namespace triggr create secret generic hello-pr \
+  --from-file=gcloud-credentials=gcp_auth
+kubectl --namespace triggr label secret/hello-pr owner=crewjam repo=hello when=pr
+
+kubectl --namespace triggr create secret generic hello-master \
+  --from-file=gcloud-credentials=gcp_auth
+kubectl --namespace triggr label secret/hello-master owner=crewjam repo=hello when=master
+
+```

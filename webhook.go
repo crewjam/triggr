@@ -46,15 +46,29 @@ func handleEvent(w http.ResponseWriter, r *http.Request) error {
 			log.Printf("handlePullRequest: %v", err)
 		}
 		return err
+	case *github.PushEvent:
+		if event.GetRef() == "refs/heads/master" {
+			err := handlePush(r.Context(), event)
+			if err != nil {
+				log.Printf("handlePush: %v", err)
+			}
+		}
+		return err
+
 	}
 	return nil
 }
 
 type Builder struct {
-	Event     *github.PullRequestEvent
-	Gist      *github.Gist
-	Config    Config
-	TargetURL string
+	//Event     *github.PullRequestEvent
+	Repo        Repo
+	SHA         string
+	Ref         string
+	Owner       string
+	Gist        *github.Gist
+	Config      Config
+	TargetURL   string
+	PullRequest *github.PullRequest
 }
 
 type Config struct {
@@ -68,22 +82,49 @@ type TaskConfig struct {
 	Command []string
 }
 
+type Repo interface {
+	GetFullName() string
+	GetName() string
+}
+
+func handlePush(ctx context.Context, event *github.PushEvent) error {
+	b := Builder{
+		Repo:  event.Repo,
+		SHA:   event.HeadCommit.GetID(),
+		Ref:   event.GetRef(),
+		Owner: event.Repo.Owner.GetName(),
+		Gist: &github.Gist{
+			Description: github.String("Build Status"),
+			Public:      github.Bool(false),
+			Files:       map[github.GistFilename]github.GistFile{},
+		},
+	}
+	return b.Build(ctx)
+}
+
 func handlePullRequest(ctx context.Context, event *github.PullRequestEvent) error {
 	b := Builder{
-		Event: event,
+		Repo:        event.PullRequest.Base.Repo,
+		PullRequest: event.PullRequest,
+		SHA:         event.PullRequest.Head.GetSHA(),
+		Ref:         fmt.Sprintf("refs/pull/%d/merge", event.PullRequest.GetNumber()),
+		Owner:       event.PullRequest.Base.Repo.Owner.GetLogin(),
 		Gist: &github.Gist{
 			Description: github.String(event.PullRequest.Base.Repo.GetFullName() + " Build Status"),
 			Public:      github.Bool(false),
 			Files:       map[github.GistFilename]github.GistFile{},
 		},
 	}
+	return b.Build(ctx)
+}
+
+func (b *Builder) Build(ctx context.Context) error {
 	if err := b.getConfig(ctx); err != nil {
 		return err
 	}
 	if err := b.writeGist(ctx); err != nil {
 		return err
 	}
-
 	for _, task := range b.Config.Tasks {
 		if err := b.startTask(ctx, task); err != nil {
 			return err
@@ -94,11 +135,11 @@ func handlePullRequest(ctx context.Context, event *github.PullRequestEvent) erro
 
 func (b *Builder) getConfig(ctx context.Context) error {
 	configFileContent, _, _, err := githubClient.Repositories.GetContents(ctx,
-		b.Event.PullRequest.Base.Repo.Owner.GetLogin(),
-		b.Event.PullRequest.Base.Repo.GetName(),
+		b.Owner,
+		b.Repo.GetName(),
 		".triggr.toml",
 		&github.RepositoryContentGetOptions{
-			Ref: b.Event.PullRequest.Head.GetSHA(),
+			Ref: b.SHA,
 		})
 	if err != nil {
 		return fmt.Errorf("cannot fetch .triggr.toml file: %v", err)
@@ -118,19 +159,22 @@ func (b *Builder) writeGist(ctx context.Context) error {
 	fmt.Fprintln(mdBuf, "# Build Record")
 	fmt.Fprintln(mdBuf)
 	fmt.Fprintf(mdBuf, "Repo: [%s](https://github.com/%s)\n",
-		b.Event.PullRequest.Base.Repo.GetFullName(),
-		b.Event.PullRequest.Base.Repo.GetFullName())
+		b.Repo.GetFullName(),
+		b.Repo.GetFullName())
 	fmt.Fprintln(mdBuf)
-	fmt.Fprintf(mdBuf, "PR: [#%d %s](%s)\n",
-		b.Event.PullRequest.GetNumber(),
-		b.Event.PullRequest.GetTitle(),
-		b.Event.PullRequest.GetHTMLURL())
-	fmt.Fprintln(mdBuf)
+
+	if b.PullRequest != nil {
+		fmt.Fprintf(mdBuf, "PR: [#%d %s](%s)\n",
+			b.PullRequest.GetNumber(),
+			b.PullRequest.GetTitle(),
+			b.PullRequest.GetHTMLURL())
+		fmt.Fprintln(mdBuf)
+	}
 	fmt.Fprintf(mdBuf, "Commit: [%s](%s)\n",
-		b.Event.PullRequest.Head.GetSHA(),
+		b.SHA,
 		fmt.Sprintf("https://github.com/%s/commit/%s",
-			b.Event.PullRequest.Head.Repo.GetFullName(),
-			b.Event.PullRequest.Head.GetSHA()))
+			b.Repo.GetFullName(),
+			b.SHA))
 	fmt.Fprintln(mdBuf)
 	pretty.Fprintf(mdBuf, "Hack:\n"+
 		"```\n"+
@@ -142,9 +186,9 @@ func (b *Builder) writeGist(ctx context.Context) error {
 		fmt.Fprintln(mdBuf, "## Task", task.Name)
 		fmt.Fprintln(mdBuf)
 		podName := fmt.Sprintf("github-%s-%s-%s-%s",
-			b.Event.PullRequest.Base.Repo.Owner.GetLogin(),
-			b.Event.PullRequest.Base.Repo.GetName(),
-			b.Event.PullRequest.Head.GetSHA()[:12],
+			b.Owner,
+			b.Repo.GetName(),
+			b.SHA[:12],
 			task.Name)
 		podLink := fmt.Sprintf("http://localhost:8001/api/v1/proxy/namespaces/kube-system/services/kubernetes-dashboard/#!/log/%s/%s/?namespace=%s",
 			*kubeNamespace, podName, *kubeNamespace)
@@ -176,9 +220,9 @@ func (b *Builder) startTask(ctx context.Context, task TaskConfig) error {
 		Context:     github.String(statusContext),
 	}
 	_, _, err := githubClient.Repositories.CreateStatus(ctx,
-		b.Event.PullRequest.Base.Repo.Owner.GetLogin(),
-		b.Event.PullRequest.Base.Repo.GetName(),
-		b.Event.PullRequest.Head.GetSHA(),
+		b.Owner,
+		b.Repo.GetName(),
+		b.SHA,
 		status,
 	)
 	if err != nil {
@@ -186,12 +230,16 @@ func (b *Builder) startTask(ctx context.Context, task TaskConfig) error {
 	}
 
 	if err := b.runTask(ctx, task); err != nil {
+		log.Printf("runTask: %v", err)
 		status.State = github.String("error")
 		status.Description = github.String(err.Error())
+		if len(*status.Description) > 140 {
+			status.Description = github.String(err.Error()[:130] + "...")
+		}
 		_, _, err = githubClient.Repositories.CreateStatus(ctx,
-			b.Event.PullRequest.Base.Repo.Owner.GetLogin(),
-			b.Event.PullRequest.Base.Repo.GetName(),
-			b.Event.PullRequest.Head.GetSHA(),
+			b.Owner,
+			b.Repo.GetName(),
+			b.SHA,
 			status,
 		)
 		if err != nil {
@@ -210,23 +258,23 @@ func (b *Builder) runTask(ctx context.Context, task TaskConfig) error {
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: fmt.Sprintf("triggr-%s-%s-%s-%s",
-				b.Event.PullRequest.Base.Repo.Owner.GetLogin(),
-				b.Event.PullRequest.Base.Repo.GetName(),
-				b.Event.PullRequest.Head.GetSHA()[:12],
+				b.Owner,
+				b.Repo.GetName(),
+				b.SHA[:12],
 				task.Name),
 			Labels: map[string]string{
 				"triggr": "true",
 				"task":   task.Name,
-				"repo":   b.Event.PullRequest.Base.Repo.GetFullName(),
-				"owner":  b.Event.PullRequest.Base.Repo.Owner.GetLogin(),
+				"repo":   b.Repo.GetName(),
+				"owner":  b.Owner,
 			},
 			Annotations: map[string]string{
-				"triggr.crewjam.com/github-target-url":     b.TargetURL,                                    // e.g.  "http://some-url/job/12345"
-				"triggr.crewjam.com/github-last-status":    "pending",                                      // e.g.   "pending"
-				"triggr.crewjam.com/github-status-context": *statusContext + task.Name,                     // e.g.   "os-triggr-build"
-				"triggr.crewjam.com/github-owner":          b.Event.PullRequest.Base.Repo.Owner.GetLogin(), // e.g.    "crewjam"
-				"triggr.crewjam.com/github-repo":           b.Event.PullRequest.Base.Repo.GetName(),        // e.g.     "hello"
-				"triggr.crewjam.com/github-ref":            b.Event.PullRequest.Head.GetSHA(),              // e.g.      "adc83b19e793491b1c6ea0fd8b46cd9f32e592fc"
+				"triggr.crewjam.com/github-target-url":     b.TargetURL,                // e.g.  "http://some-url/job/12345"
+				"triggr.crewjam.com/github-last-status":    "pending",                  // e.g.   "pending"
+				"triggr.crewjam.com/github-status-context": *statusContext + task.Name, // e.g.   "os-triggr-build"
+				"triggr.crewjam.com/github-owner":          b.Owner,                    // e.g.    "crewjam"
+				"triggr.crewjam.com/github-repo":           b.Repo.GetName(),           // e.g.     "hello"
+				"triggr.crewjam.com/github-ref":            b.SHA,                      // e.g.      "adc83b19e793491b1c6ea0fd8b46cd9f32e592fc"
 				"triggr.crewjam.com/task-name":             task.Name,
 				"triggr.crewjam.com/output-gist":           b.Gist.GetID(),
 				"triggr.crewjam.com/output-gist-file-name": task.Name + "-output.txt",
@@ -247,11 +295,11 @@ func (b *Builder) runTask(ctx context.Context, task TaskConfig) error {
 						{
 							Name: "GIT_CLONE_URL",
 							Value: fmt.Sprintf("https://%s:@github.com/%s.git",
-								*githubAccessToken, b.Event.PullRequest.Base.Repo.GetFullName()),
+								*githubAccessToken, b.Repo.GetFullName()),
 						},
 						{
 							Name:  "GIT_REF",
-							Value: fmt.Sprintf("refs/pull/%d/merge", b.Event.PullRequest.GetNumber()),
+							Value: b.Ref,
 						},
 						{
 							Name:  "TASK_NAME",
@@ -259,19 +307,19 @@ func (b *Builder) runTask(ctx context.Context, task TaskConfig) error {
 						},
 						{
 							Name:  "GITHUB_OWNER",
-							Value: b.Event.PullRequest.Base.Repo.Owner.GetLogin(),
+							Value: b.Owner,
 						},
 						{
 							Name:  "GITHUB_NAME",
-							Value: b.Event.PullRequest.Base.Repo.GetName(),
+							Value: b.Repo.GetName(),
 						},
 						{
 							Name:  "GITHUB_REPO",
-							Value: b.Event.PullRequest.Base.Repo.GetFullName(),
+							Value: b.Repo.GetFullName(),
 						},
 						{
 							Name:  "GIT_REVISION",
-							Value: b.Event.PullRequest.Head.GetSHA(),
+							Value: b.SHA,
 						},
 						{
 							Name:  "GITHUB_STATUS_TARGET_URL",

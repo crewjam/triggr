@@ -1,5 +1,5 @@
 #!/bin/bash
-set -x
+set -e
 
 if [ -z "$GIT_CLONE_URL" ] ; then
     if [ ! -z "$GITHUB_REPO" ] ; then 
@@ -12,11 +12,11 @@ if [ -z "$GIT_CLONE_URL" ] ; then
     fi
 fi
 
-if [ -z $SOURCE_DIR ] ; then
-    if [ -z $GITHUB_REPO ] ; then
+if [ -z "$SOURCE_DIR" ] ; then
+    if [ ! -z "$GITHUB_REPO" ] ; then
         SOURCE_DIR=${SOURCE_DIR-$GOPATH/src/github.com/$GITHUB_REPO}
     fi
-    SOURCE_DIR=${SOURCE_DIR-.}
+    SOURCE_DIR=${SOURCE_DIR-/src}
 fi
 
 if [ ! -z "$GIT_CLONE_URL" ] ; then

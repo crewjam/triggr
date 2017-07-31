@@ -48,12 +48,12 @@ kubectl apply -f deploy.yaml
 Wait for the external IP to be available:
 
 ```
-kubectl get service triggr
+kubectl get service triggr -w
 ```
 
 3. Create a webhook in github, *Settings*, *Webhooks*, *Add WebHook*.  
 
-- Set the URL to *http://<SERVICE-URL>/event*.
+- Set the URL to *http:// **SERVICE-URL** /event*.
 - Set the Content type to *application/json*.
 - Set the secret to the random value you generated before
 - Choose "Let me select individual events." and pick *Push* and *Pull Request*

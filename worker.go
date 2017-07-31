@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"time"
 
 	"github.com/golang/glog"
@@ -58,8 +59,10 @@ func (c *Controller) syncToStdout(key string) error {
 	}
 
 	pod := obj.(*v1.Pod)
+	log.Printf("namespace: %s pod: %s", pod.GetNamespace(), pod.GetName())
+
 	annotations := pod.GetObjectMeta().GetAnnotations()
-	if annotations["groove.id/github-status-context"] == "" {
+	if annotations["triggr.crewjam.com/github-status-context"] == "" {
 		return nil
 	}
 
@@ -78,15 +81,15 @@ func (c *Controller) syncToStdout(key string) error {
 		}
 		break
 	}
-	if annotations["groove.id/github-last-status"] == githubState {
+	if annotations["triggr.crewjam.com/github-last-status"] == githubState {
 		fmt.Printf("%s: githubState is unchanged %s\n", pod.GetName(), githubState)
 		return nil
 	}
 
 	// capture logs and update gist
-	gistID := annotations["groove.id/output-gist"]
+	gistID := annotations["triggr.crewjam.com/output-gist"]
 	if githubState != "pending" && gistID != "" {
-		gistFileName := annotations["groove.id/output-gist-file-name"]
+		gistFileName := annotations["triggr.crewjam.com/output-gist-file-name"]
 		if gistFileName == "" {
 			gistFileName = pod.GetName() + ".txt"
 		}
@@ -124,14 +127,14 @@ func (c *Controller) syncToStdout(key string) error {
 	{
 		status := &github.RepoStatus{
 			State:       github.String(githubState),
-			TargetURL:   github.String(annotations["groove.id/github-target-url"]),
+			TargetURL:   github.String(annotations["triggr.crewjam.com/github-target-url"]),
 			Description: github.String(githubState),
-			Context:     github.String(annotations["groove.id/github-status-context"]),
+			Context:     github.String(annotations["triggr.crewjam.com/github-status-context"]),
 		}
 		_, _, err = githubClient.Repositories.CreateStatus(ctx,
-			annotations["groove.id/github-owner"],
-			annotations["groove.id/github-repo"],
-			annotations["groove.id/github-ref"],
+			annotations["triggr.crewjam.com/github-owner"],
+			annotations["triggr.crewjam.com/github-repo"],
+			annotations["triggr.crewjam.com/github-ref"],
 			status,
 		)
 		if err != nil {
@@ -149,7 +152,7 @@ func (c *Controller) syncToStdout(key string) error {
 			return err
 		}
 	} else {
-		pod.ObjectMeta.Annotations["groove.id/github-last-status"] = githubState
+		pod.ObjectMeta.Annotations["triggr.crewjam.com/github-last-status"] = githubState
 		if _, err := kubeClient.CoreV1().Pods(pod.GetNamespace()).Update(pod); err != nil {
 			glog.Errorf("cannot update pod: %v", err)
 			return err
@@ -202,7 +205,7 @@ func (c *Controller) runWorker() {
 func runController() {
 	podListWatcher := cache.NewListWatchFromClient(
 		kubeClient.CoreV1().RESTClient(),
-		"pods", v1.NamespaceDefault, fields.Everything())
+		"pods", *kubeNamespace, fields.Everything())
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 	indexer, informer := cache.NewIndexerInformer(podListWatcher, &v1.Pod{}, 0, cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {

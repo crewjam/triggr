@@ -1,0 +1,10 @@
+image = "crewjam/triggr-build-go"
+
+[[task]]
+name = "lint"
+image = "yourself/customcontainer"
+command = ["golint -set_exit_status ./..."]
+
+[[task]]
+name = "test"
+command = ["go", "test", "./..."]

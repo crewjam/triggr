@@ -1,0 +1,64 @@
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: triggr
+  namespace: default
+spec:
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        name: triggr
+        app: triggr
+    spec:
+      containers:
+      - name: server
+        image: "crewjam/triggr"
+        imagePullPolicy: Always
+        env:
+          - name: GITHUB_WEBHOOK_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: github
+                key: webhook-secret
+          - name: GITHUB_ACCESS_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: github
+                key: access-token
+          - name: GITHUB_STATUS_CONTEXT
+            value: triggr
+          - name: K8S_NAMESPACE
+            value: triggr
+
+        ports:
+        - name: http
+          containerPort: 80
+        volumeMounts:
+          - name: "service-account"
+            mountPath: "/var/run/secret/cloud.google.com"
+          - name: "certs"
+            mountPath: "/etc/ssl/certs"
+      volumes:
+        - name: "service-account"
+          secret:
+            secretName: "service-account"
+        - name: "service-account"
+          secret:
+            secretName: "service-account"
+        - name: "certs"
+          hostPath:
+            path: "/etc/ssl/certs"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: triggr
+spec:
+  type: LoadBalancer
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  selector:
+    name: triggr
